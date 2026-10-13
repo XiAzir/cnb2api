@@ -438,9 +438,14 @@ const mockServer = http.createServer((req, res) => {
       return;
     }
     if (parsed.model === 'mock-empty') {
-      // 200 但 SSE 体零 data 事件（只有注释行）：空流收尾必须完整
+      // 200 with no completion must be treated as an upstream error.
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       res.end(': keep-alive\n\n');
+      return;
+    }
+    if (parsed.model === 'mock-early-fin') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.end('data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n');
       return;
     }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -520,13 +525,19 @@ test('E2E 错误透传：上游 500 → 500 Anthropic error envelope', async () 
   assert.equal(body.error.message, 'boom');
 });
 
-test('E2E 空流：上游 200 零 data 事件 → 流式仍以 message_delta + message_stop 收尾', async () => {
-  const res = await postMessages({ model: 'mock-empty', max_tokens: 32, stream: true, messages: [{ role: 'user', content: 'hi' }] }, { 'x-api-key': KEY });
-  assert.equal(res.status, 200);
-  const text = await res.text();
-  const events = [...text.matchAll(/event: (.+)\ndata: (.+)\n\n/g)].map((m) => ({ event: m[1], data: JSON.parse(m[2]) }));
-  assert.deepEqual(events.map((e) => e.event), ['message_start', 'ping', 'message_delta', 'message_stop']);
-  assert.equal(events[2].data.delta.stop_reason, 'end_turn');
+test('E2E 空流和提前结束 → Anthropic error 事件，而不是 message_stop', async () => {
+  for (const model of ['mock-empty', 'mock-early-fin']) {
+    const res = await postMessages({ model, max_tokens: 32, stream: true, messages: [{ role: 'user', content: 'hi' }] }, { 'x-api-key': KEY });
+    assert.equal(res.status, 200);
+    const text = await res.text();
+    const events = [...text.matchAll(/event: (.+)\ndata: (.+)\n\n/g)].map((m) => ({ event: m[1], data: JSON.parse(m[2]) }));
+    assert.equal(events.at(-1).event, 'error');
+    assert.equal(events.at(-1).data.error.type, 'api_error');
+    assert.equal(events.some((e) => e.event === 'message_stop'), false);
+  }
+  const nonstream = await postMessages({ model: 'mock-empty', max_tokens: 32, messages: [{ role: 'user', content: 'hi' }] }, { 'x-api-key': KEY });
+  assert.equal(nonstream.status, 502);
+  assert.equal((await nonstream.json()).error.type, 'api_error');
 });
 
 test('E2E 413：超限请求体 → Anthropic error envelope', async () => {
