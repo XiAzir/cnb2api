@@ -104,7 +104,7 @@ test('请求转换：assistant tool_use arguments 同样改写，tool_choice 缺
   );
 });
 
-test('流式：abort() 收尾闭合所有块并以 message_stop 结束', () => {
+test('流式：abort() 发出错误而非伪造 message_stop', () => {
   const s = new AnthropicStream({ requestId: 'ra' });
   const raw = [
     ...s.feed({ choices: [{ index: 0, delta: { role: 'assistant', content: 'partial' } }] }),
@@ -112,13 +112,13 @@ test('流式：abort() 收尾闭合所有块并以 message_stop 结束', () => {
     ...s.abort(),
   ];
   const names = raw.map((e) => e.event);
-  // 未闭合的 text 块必须先 content_block_stop，再收尾两事件；序列中不允许重复 stop
-  assert.deepEqual(names.slice(-3), ['content_block_stop', 'message_delta', 'message_stop']);
-  assert.equal(names.filter((n) => n === 'message_stop').length, 1);
-  assert.equal(names.filter((n) => n === 'content_block_stop').length, 1);
-  // abort 后再 feed/end 不产出任何事件（幂等收尾）
+  assert.equal(names.at(-1), 'error');
+  assert.equal(names.includes('message_stop'), false);
+  assert.equal(names.includes('message_delta'), false);
+  assert.deepEqual(JSON.parse(raw.at(-1).data), { type: 'error', error: { type: 'api_error', message: 'upstream stream interrupted' } });
   assert.deepEqual(s.feed({ choices: [{ delta: { content: 'x' } }] }), []);
   assert.deepEqual(s.end(), []);
+  assert.deepEqual(s.abort(), []);
 });
 
 test('流式：上游空流（200 零 data 事件）收尾仍发出完整 message_start…message_stop', () => {
