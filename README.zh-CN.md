@@ -176,7 +176,9 @@ npm run quota                 # 或: npx cnb2api-quota
 | `PROXY_PORT` | `9001` | 服务监听端口。 |
 | `PROXY_UPSTREAM_TIMEOUT_MS` | `15000` | 上游连接首字节超时 (ms)。 |
 | `PROXY_IDLE_TIMEOUT_MS` | `300000` | 流式事件空闲超时看门狗 (ms)。 |
-| `CNB2API_ALLOW_THINKING` | 关闭 | 设为 `1` 时，把客户端的思考开关（`reasoning_effort` / `reasoning` / `enable_thinking` / `thinking`，以及 Anthropic 的 `thinking:{type:"enabled"}`）透传到上游 thinking 变体，而不是出站剥除。仅在客户端会给出足够大 `max_tokens` 时开启——详见下方说明。 |
+| `CNB2API_THINKING_MODE` | `off` | `off`：默认剥除思考参数；`guarded`：仅在请求携带足够大 `max_tokens` 时放行；`passthrough`：完全透传思考开关。 |
+| `CNB2API_THINKING_MIN_TOKENS` | `32768` | `guarded` 模式要求的最小 `max_tokens`；这是预检阈值，**不是**上游推理 token 的实际限额。 |
+| `CNB2API_ALLOW_THINKING` | 关闭 | 兼容旧版：当未配置 `CNB2API_THINKING_MODE` 时，设为 `1` 等同于 `passthrough`。设为 `1` 时，把客户端的思考开关（`reasoning_effort` / `reasoning` / `enable_thinking` / `thinking`，以及 Anthropic 的 `thinking:{type:"enabled"}`）透传到上游 thinking 变体，而不是出站剥除。仅在客户端会给出足够大 `max_tokens` 时开启——详见下方说明。 |
 | `REGISTER_URL` | — (可选) | 中继自注册 `/ops/register` 地址。 |
 | `REG_TOKEN` | — (可选) | 中继自注册鉴权密钥。 |
 
@@ -189,7 +191,9 @@ npm run quota                 # 或: npx cnb2api-quota
 
 该默认值安全但绝对：它同时把**给了足够预算**的调用方一并挡在门外，而这类调用方本来是能
 正常思考的（`max_tokens: 60000` 实测推理与正文依次产出）。设 `CNB2API_ALLOW_THINKING=1`
-即可显式开启，并由调用方自行保证预算。未携带思考开关的请求在两种设置下行为完全一致。
+即可显式开启，并由调用方自行保证预算。未携带思考开关的请求在两种设置下行为完全一致。`guarded` 模式下，若请求显式开启 Thinking，但 `max_tokens` 小于 32768（或没有合法的数值），会在访问上游前返回 HTTP 400。阈值只是本地预检，不保证 CNB 上游一定能在预算内答完。
+
+**CNB 分支注意：**在开发分支验证时，确保工作区也运行该分支。原 `.cnb.yml` 的保活任务固定指向 `main`，自动恢复时可能启动未改进的旧版本。不要在测试通过前合并到 `main`。
 
 ---
 
