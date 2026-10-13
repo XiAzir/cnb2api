@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, feat/reliable-thinking-streams]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -13,6 +14,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: JavaScript syntax check
+        run: |
+          for file in src/*.mjs test/*.mjs bin/*.mjs; do node --check "$file"; done
       - run: node --test
       - name: deploy scripts syntax
         run: |
