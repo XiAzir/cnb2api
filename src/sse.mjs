@@ -53,7 +53,7 @@ export function aggregate(text) {
 
   return {
     id, object: 'chat.completion', created, model,
-    choices: [{ index: 0, message, finish_reason: finishReason || 'stop' }],
+    choices: [{ index: 0, message, finish_reason: finishReason }],
     usage: usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, usage_estimated: true },
   };
 }
