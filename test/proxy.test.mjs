@@ -43,7 +43,7 @@ const mockServer = http.createServer((req, res) => {
     if (parsed.model === 'mock-early-fin') {
       // 200 + valid partial SSE but no terminal finish_reason.
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-      res.end('data: {"choices":[{"delta":{"content":"partial"}}]}\\n\\n');
+      res.end('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');
       return;
     }
     if (parsed.model === 'mock-stall') {
