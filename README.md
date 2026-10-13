@@ -176,7 +176,9 @@ npm run quota                 # or: npx cnb2api-quota
 | `PROXY_PORT` | `9001` | Listen port. |
 | `PROXY_UPSTREAM_TIMEOUT_MS` | `15000` | Upstream connect / first-byte timeout (ms). |
 | `PROXY_IDLE_TIMEOUT_MS` | `300000` | Per-stream idle watchdog (ms). |
-| `CNB2API_ALLOW_THINKING` | off | Set to `1` to forward client thinking toggles (`reasoning_effort` / `reasoning` / `enable_thinking` / `thinking`, and Anthropic `thinking:{type:"enabled"}`) to the upstream thinking variant instead of stripping them. Only use it if your clients send a large `max_tokens` — see the thinking note below. |
+| `CNB2API_THINKING_MODE` | `off` | `off`: remove thinking toggles (original default); `guarded`: allow thinking only when the request declares a sufficient total token budget; `passthrough`: forward thinking toggles unchanged. |
+| `CNB2API_THINKING_MIN_TOKENS` | `32768` | Minimum explicit `max_tokens` in guarded mode. This is a warning threshold, **not** an upstream reasoning-token cap. |
+| `CNB2API_ALLOW_THINKING` | off | Legacy alias: `1` selects `passthrough` when `CNB2API_THINKING_MODE` is unset. Set to `1` to forward client thinking toggles (`reasoning_effort` / `reasoning` / `enable_thinking` / `thinking`, and Anthropic `thinking:{type:"enabled"}`) to the upstream thinking variant instead of stripping them. Only use it if your clients send a large `max_tokens` — see the thinking note below. |
 | `REGISTER_URL` | — (optional) | Relay `/ops/register` endpoint for self-registration. |
 | `REG_TOKEN` | — (optional) | Shared secret for self-registration. |
 
@@ -193,7 +195,9 @@ That default is safe but absolute: it also locks out callers that *do* provide a
 budget, for whom thinking works correctly (verified at `max_tokens: 60000`, where
 reasoning and answer are emitted in sequence). Set `CNB2API_ALLOW_THINKING=1` to opt in
 and take responsibility for the budget. Requests that carry no thinking toggle behave
-identically either way.
+identically in all modes. In `guarded` mode, a client explicitly requesting Thinking with `max_tokens` below 32768 (or with no numeric budget) receives HTTP 400 *before* the upstream request. This is only a preflight check; CNB may still exhaust larger budgets. Upstream SSE streams with no terminal finish reason are reported as errors instead of fabricated successful completions.
+
+**CNB branch caution:** while validating a feature branch, make sure its workspace runs the same branch. The existing `.cnb.yml` keepalive is pinned to `main` and can restart a `main` workspace. Do not merge before tests.
 
 ---
 
