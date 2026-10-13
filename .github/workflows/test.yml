@@ -2,7 +2,7 @@ name: test
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/reliable-thinking-streams]
   pull_request:
 
 jobs:
