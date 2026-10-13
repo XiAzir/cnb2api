@@ -17,13 +17,14 @@ const KEY = 'test-key-12345';
 const STATE_PATH = join(tmpdir(), `cnb2api-models-test-${process.pid}.json`);
 
 // ---- mock 上游：完整 SSE（usage/tool_calls/finish_reason）+ 可选慢响应 ----
-const upstreamState = { clientAborted: false, lastBody: null };
+const upstreamState = { clientAborted: false, lastBody: null, requestCount: 0 };
 const mockServer = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
     const parsed = JSON.parse(body);
     upstreamState.lastBody = parsed; // 捕获打向上游的出站请求体（剥除类断言用）
+    upstreamState.requestCount++;
 
     if (parsed.model === 'mock-500') {
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -37,6 +38,12 @@ const mockServer = http.createServer((req, res) => {
     if (parsed.model === 'mock-reset') {
       // 收到请求后直接断连 → 代理应回 502，且错误消息不泄漏内部异常细节
       res.socket.destroy();
+      return;
+    }
+    if (parsed.model === 'mock-early-fin') {
+      // 200 + valid partial SSE but no terminal finish_reason.
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.end('data: {"choices":[{"delta":{"content":"partial"}}]}\\n\\n');
       return;
     }
     if (parsed.model === 'mock-stall') {
@@ -416,6 +423,46 @@ test('reasoning_effort 出站剥除（真机教训：触发上游 thinking 变�
   await chat({ model: 'mock-model', messages: [], stream: true, reasoning_effort: 'high' });
   assert.equal(upstreamState.lastBody.reasoning_effort, undefined, 'streaming path must strip too');
   assert.equal(upstreamState.lastBody.stream, true);
+});
+
+test('上游提前结束没有 finish_reason → OpenAI 流式错误事件，非流式 HTTP 502', async () => {
+  const streamed = await chat({ model: 'mock-early-fin', messages: [], stream: true });
+  assert.equal(streamed.status, 200, 'SSE headers are already sent before stream failure is detected');
+  const frames = await streamed.text();
+  assert.match(frames, /"content":"partial"/);
+  assert.match(frames, /"type":"api_error"/);
+  const plain = await chat({ model: 'mock-early-fin', messages: [], stream: false });
+  assert.equal(plain.status, 502);
+  assert.match((await plain.json()).error.message, /without finish_reason/);
+});
+
+test('guarded Thinking rejects insufficient budget without calling upstream', async () => {
+  const guardPort = PROXY_PORT + 3;
+  const child = startProxy({
+    PROXY_PORT: String(guardPort),
+    CNB2API_THINKING_MODE: 'guarded',
+    CNB2API_THINKING_MIN_TOKENS: '32768',
+    PROXY_MODELS_STATE: join(tmpdir(), `cnb2api-guard-${process.pid}.json`),
+  });
+  try {
+    await waitPort(guardPort);
+    const send = (data) => fetch(`http://127.0.0.1:${guardPort}/v1/chat/completions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${KEY}` },
+      body: JSON.stringify({ model: 'mock-model', messages: [], stream: false, ...data }),
+    });
+    const before = upstreamState.requestCount;
+    const blocked = await send({ max_tokens: 8192, reasoning_effort: 'high' });
+    assert.equal(blocked.status, 400);
+    assert.match((await blocked.json()).error.message, /max_tokens/);
+    assert.equal(upstreamState.requestCount, before, 'request must be rejected before reaching CNB');
+    const plain = await send({ max_tokens: 64 });
+    assert.equal(plain.status, 200, 'non-thinking requests are not blocked');
+    const allowed = await send({ max_tokens: 32768, reasoning_effort: 'medium' });
+    assert.equal(allowed.status, 200);
+    assert.equal(upstreamState.lastBody.reasoning_effort, 'medium');
+  } finally {
+    child.kill('SIGTERM');
+  }
 });
 
 test('超时环境变量非法值 → 启动即拒（fail-fast，回归：NaN 曾使 setTimeout 按 0ms 触发、每条流瞬间 abort）', async () => {
