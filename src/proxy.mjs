@@ -155,7 +155,7 @@ export async function forward({ reqId, payload, wantStream, res, transform }) {
       if (res.destroyed || res.writableEnded) clientGone = true;
       if (!res.destroyed && !res.writableEnded) {
         if (transform) writeEvents(transform.stream.abort());
-        else res.write('data: ' + JSON.stringify({ error: { type: 'api_error', message: 'upstream stream interrupted' } }) + '\\n\\n');
+        else res.write('data: ' + JSON.stringify({ error: { type: 'api_error', message: 'upstream stream interrupted' } }) + '\n\n');
         res.end();
       }
       log.warn(reqId, 'stream aborted', { err: String(e).slice(0, 120) });
