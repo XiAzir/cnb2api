@@ -360,10 +360,16 @@ export class AnthropicStream {
     return [...head, ...this.out];
   }
 
-  // 上游中途夭折：Anthropic 规范无 abort 事件，尽力收尾（客户端看到的是截断的完整消息）
+  // Upstream stream failure must never be disguised as a successful message_stop.
   abort() {
     if (this.finished) return [];
-    return this.end();
+    this.finished = true;
+    this.out.length = 0;
+    this.out.push(evt('error', {
+      type: 'error',
+      error: { type: 'api_error', message: 'upstream stream interrupted' },
+    }));
+    return [...this.out];
   }
 
   deltaFor(type, deltaEvent, partial) {
