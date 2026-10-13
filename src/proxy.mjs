@@ -153,8 +153,11 @@ export async function forward({ reqId, payload, wantStream, res, transform }) {
       ac.abort();
       // 中途断流归因：客户端先断（res 已死）→ 取消上游属正常止损；res 仍活 → 上游停滞/读失败（watchdog 或传输错误）
       if (res.destroyed || res.writableEnded) clientGone = true;
-      if (transform) writeEvents(transform.stream.abort());
-      if (!res.destroyed) res.end();
+      if (!res.destroyed && !res.writableEnded) {
+        if (transform) writeEvents(transform.stream.abort());
+        else res.write('data: ' + JSON.stringify({ error: { type: 'api_error', message: 'upstream stream interrupted' } }) + '\\n\\n');
+        res.end();
+      }
       log.warn(reqId, 'stream aborted', { err: String(e).slice(0, 120) });
     } finally {
       clearTimeout(idle);
