@@ -1,4 +1,8 @@
+import { THINKING_MODES } from './thinking.mjs';
+
 // Central env loading + fail-fast validation.
+const thinkingMode = process.env.CNB2API_THINKING_MODE
+  || (process.env.CNB2API_ALLOW_THINKING === '1' ? 'passthrough' : 'off');
 // The proxy refuses to start with a missing/weak key instead of running exposed.
 export const config = {
   port: Number(process.env.PROXY_PORT || 9001),
@@ -21,6 +25,11 @@ export const config = {
   idleTimeoutMs: Number(process.env.PROXY_IDLE_TIMEOUT_MS || 300_000),        // per-stream idle cap (reset each chunk)
   authFailWindowMs: 60_000,
   authFailMax: 10,
+  // Off by default. Legacy CNB2API_ALLOW_THINKING=1 retains passthrough behavior.
+  // guarded checks max_tokens before forwarding but cannot cap upstream reasoning.
+  thinkingMode,
+  thinkingMinTokens: Number(process.env.CNB2API_THINKING_MIN_TOKENS || 32768),
+  allowThinking: thinkingMode !== 'off',
   upstreamUrl: '',
 };
 
@@ -41,6 +50,14 @@ if (!config.upstreamToken) {
 }
 if (!config.upstreamUrl) {
   console.error('[config] upstream URL is empty: set CNB_REPO_SLUG (org/repo) or UPSTREAM_OVERRIDE. Refusing to start.');
+  process.exit(1);
+}
+if (!THINKING_MODES.includes(config.thinkingMode)) {
+  console.error('[config] CNB2API_THINKING_MODE must be off, guarded, or passthrough. Refusing to start.');
+  process.exit(1);
+}
+if (!Number.isSafeInteger(config.thinkingMinTokens) || config.thinkingMinTokens <= 0) {
+  console.error('[config] CNB2API_THINKING_MIN_TOKENS must be a positive integer. Refusing to start.');
   process.exit(1);
 }
 // 数字环境变量塞非法值时 Number() 得 NaN，setTimeout(fn, NaN) 按 0ms 立即触发 →

@@ -10,9 +10,18 @@ import { observe as observeModel } from './models.mjs';
 // content 全空（答案永不生成，真机实测 2048/8192 token 必现）。上游无正确开关可配，
 // 出站统一剥除、锁定非 thinking 变体（与 /v1/messages 请求侧丢弃 thinking 块同一策略）。
 // 表驱动：上游若引入新的思考开关命名，往这张表加一项即可。
+//
+// 逃生口：剥除是"安全默认值"，不是"唯一正确策略"。它把客户端永久锁死在非 thinking
+// 变体上，思考能力整体消失——2026-10-08 同步本提交后，某下游的 CNB 侧 reasoning 从
+// 每天数百万字符直接归零，且试遍参数拼写（reasoningEffort / enableThinking /
+// chat_template_kwargs / extra_body / thinking_budget）都无法再触达 thinking 变体。
+// 会翻车的组合其实只是"思考开关 + 过小的 max_tokens"；max_tokens 给够时推理与正文会
+// 依次产出（2026-09-18/09-20 真实流量在 max_tokens=60000 下完全正常）。
+// 因此：默认仍剥除，工作区显式设 CNB2API_ALLOW_THINKING=1 时放行，由客户端自负预算。
 const REASONING_TRIGGERS = ['reasoning_effort', 'reasoning', 'enable_thinking', 'thinking'];
 
 function stripReasoningTriggers(payload) {
+  if (config.allowThinking) return payload;
   if (!REASONING_TRIGGERS.some((k) => k in payload)) return payload;
   const out = { ...payload };
   for (const k of REASONING_TRIGGERS) delete out[k];
@@ -83,6 +92,7 @@ export async function forward({ reqId, payload, wantStream, res, transform }) {
     let sseTail = '';      // 跨 chunk 的半行缓冲（SSE 行可能被 TCP 分包截断）
     let usage = null;      // 流式路径从尾部 chunk 提取 usage（OpenAI 约定：最后一个 data 带 usage）
     let ok = false;        // 流正常走完（未中途 abort/停滞）
+    let sawFinishReason = false; // A clean EOF without a final choice is still an incomplete response.
     let clientGone = false; // 客户端主动断开（正常行为，与上游流故障区分：不计 errors）
     // 行处理：usage 提取（所有路径）+ 协议转换（挂 transform 时逐行喂流式状态机）
     const handleLine = (line) => {
@@ -92,6 +102,8 @@ export async function forward({ reqId, payload, wantStream, res, transform }) {
       if (!data || data === '[DONE]') return;
       let j;
       try { j = JSON.parse(data); } catch { return; /* 心跳/非 JSON 行忽略 */ }
+      if (j.error) throw new Error('upstream stream returned an error event');
+      if (j.choices?.some((choice) => choice?.finish_reason)) sawFinishReason = true;
       if (j.usage) usage = j.usage;
       if (j.model) observeModel(j.model); // 嗅探上游真实模型名（无 list 接口，只能从响应读）
       if (transform) writeEvents(transform.stream.feed(j));
@@ -118,7 +130,12 @@ export async function forward({ reqId, payload, wantStream, res, transform }) {
     });
     try {
       for (;;) {
-        if (res.destroyed || ac.signal.aborted) { clientGone = true; await reader.cancel().catch(() => {}); break; }
+        if (res.destroyed || ac.signal.aborted) {
+          clientGone = true;
+          ac.abort();
+          void reader.cancel().catch(() => {});
+          break;
+        }
         const { done, value } = await readChunk();
         if (done) break;
         if (transform) {
@@ -134,18 +151,24 @@ export async function forward({ reqId, payload, wantStream, res, transform }) {
         }
       }
       // 收尾 flush：末尾 usage chunk 若不以换行结尾（上游直接 FIN），残余在 sseTail 里，此处补解析
-      decodeAndParse(null);
-      if (transform) writeEvents(transform.stream.end());
-      if (!res.destroyed) res.end();
-      ok = true;
+      if (!clientGone) {
+        decodeAndParse(null);
+        if (!sawFinishReason) throw new Error('upstream stream ended without finish_reason');
+        if (transform) writeEvents(transform.stream.end());
+        if (!res.destroyed) res.end();
+        ok = true;
+      }
     } catch (e) {
       clearTimeout(idle);
-      await reader.cancel().catch(() => {});
-      ac.abort();
+      ac.abort(); // Abort pending read before cancellation; a stuck reader.cancel() must not hang error delivery.
+      void reader.cancel().catch(() => {});
       // 中途断流归因：客户端先断（res 已死）→ 取消上游属正常止损；res 仍活 → 上游停滞/读失败（watchdog 或传输错误）
       if (res.destroyed || res.writableEnded) clientGone = true;
-      if (transform) writeEvents(transform.stream.abort());
-      if (!res.destroyed) res.end();
+      if (!res.destroyed && !res.writableEnded) {
+        if (transform) writeEvents(transform.stream.abort());
+        else res.write('data: ' + JSON.stringify({ error: { type: 'api_error', message: 'upstream stream interrupted' } }) + '\n\n');
+        res.end();
+      }
       log.warn(reqId, 'stream aborted', { err: String(e).slice(0, 120) });
     } finally {
       clearTimeout(idle);
@@ -173,6 +196,11 @@ export async function forward({ reqId, payload, wantStream, res, transform }) {
   }
   clearTimeout(idleTimer);
   const body = aggregate(text);
+  if (!body.choices?.[0]?.finish_reason) {
+    recordUsage({ errors: 1 });
+    log.warn(reqId, 'upstream incomplete response', { ms: Date.now() - started });
+    return { handled: false, status: 502, body: { error: { message: 'upstream stream ended without finish_reason' } } };
+  }
   if (body.model) observeModel(body.model); // 嗅探上游真实模型名（非流式聚合结果里的 model）
   recordUsage({ prompt: body.usage.prompt_tokens || 0, completion: body.usage.completion_tokens || 0 });
   log.info(reqId, 'chat done', { ms: Date.now() - started, out: body.usage.completion_tokens });

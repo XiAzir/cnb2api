@@ -3,6 +3,7 @@ import http from 'node:http';
 import { config } from './config.mjs';
 import { checkAuth } from './auth.mjs';
 import { forward } from './proxy.mjs';
+import { validateThinkingBudget } from './thinking.mjs';
 import { log, newReqId } from './log.mjs';
 import { snapshot as usageSnapshot } from './usage.mjs';
 import { list as listModels } from './models.mjs';
@@ -95,6 +96,8 @@ async function handleChatCompletions(req, res, reqId) {
   const parsed = await readJsonBody(req, res, reqId);
   if (parsed === null) return;
 
+  const budgetError = validateThinkingBudget(parsed, { mode: config.thinkingMode, minTokens: config.thinkingMinTokens });
+  if (budgetError) return send(res, 400, { error: { type: 'invalid_request_error', message: budgetError } });
   const wantStream = parsed.stream === true;
   const out = await forward({ reqId, payload: parsed, wantStream, res });
   if (out.handled) return; // 流式：proxy.mjs 已写完响应
@@ -159,13 +162,15 @@ const server = http.createServer(async (req, res) => {
 
       let openaiPayload;
       try {
-        openaiPayload = fromAnthropicRequest(anthropicBody);
+        openaiPayload = fromAnthropicRequest(anthropicBody, { allowThinking: config.allowThinking });
       } catch (e) {
         if (e instanceof ProtocolError) {
           return send(res, e.status, { type: 'error', error: { type: 'invalid_request_error', message: e.message } });
         }
         throw e;
       }
+      const budgetError = validateThinkingBudget(openaiPayload, { mode: config.thinkingMode, minTokens: config.thinkingMinTokens });
+      if (budgetError) return send(res, 400, anthropicError(400, { error: { message: budgetError } }));
       const clientModel = anthropicBody.model || '';
       const wantStream = openaiPayload.stream === true;
 

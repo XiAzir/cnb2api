@@ -104,7 +104,7 @@ test('请求转换：assistant tool_use arguments 同样改写，tool_choice 缺
   );
 });
 
-test('流式：abort() 收尾闭合所有块并以 message_stop 结束', () => {
+test('流式：abort() 发出错误而非伪造 message_stop', () => {
   const s = new AnthropicStream({ requestId: 'ra' });
   const raw = [
     ...s.feed({ choices: [{ index: 0, delta: { role: 'assistant', content: 'partial' } }] }),
@@ -112,13 +112,13 @@ test('流式：abort() 收尾闭合所有块并以 message_stop 结束', () => {
     ...s.abort(),
   ];
   const names = raw.map((e) => e.event);
-  // 未闭合的 text 块必须先 content_block_stop，再收尾两事件；序列中不允许重复 stop
-  assert.deepEqual(names.slice(-3), ['content_block_stop', 'message_delta', 'message_stop']);
-  assert.equal(names.filter((n) => n === 'message_stop').length, 1);
-  assert.equal(names.filter((n) => n === 'content_block_stop').length, 1);
-  // abort 后再 feed/end 不产出任何事件（幂等收尾）
+  assert.equal(names.at(-1), 'error');
+  assert.equal(names.includes('message_stop'), false);
+  assert.equal(names.includes('message_delta'), false);
+  assert.deepEqual(JSON.parse(raw.at(-1).data), { type: 'error', error: { type: 'api_error', message: 'upstream stream interrupted' } });
   assert.deepEqual(s.feed({ choices: [{ delta: { content: 'x' } }] }), []);
   assert.deepEqual(s.end(), []);
+  assert.deepEqual(s.abort(), []);
 });
 
 test('流式：上游空流（200 零 data 事件）收尾仍发出完整 message_start…message_stop', () => {
@@ -231,6 +231,39 @@ test('请求转换：thinking 请求参数不泄漏出站（真机教训：触�
   // 非思考字段不受影响
   assert.equal(out.max_tokens, 100);
   assert.equal(out.messages.length, 1);
+});
+
+test('请求转换：显式开启 CNB2API_ALLOW_THINKING 后 thinking 映射透传（逃生口）', () => {
+  // 默认丢弃是安全默认值，但会把客户端永久锁死在非 thinking 变体上。部署显式
+  // opt-in 后按上游 OpenAI 端点认识的形状映射：thinking:{type:enabled} +
+  // reasoning_effort。budget_tokens 不映射（上游无对应字段）。
+  const out = fromAnthropicRequest({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 60000,
+    thinking: { type: 'enabled', budget_tokens: 2048, effort: 'high' },
+    messages: [{ role: 'user', content: 'hi' }],
+  }, { allowThinking: true });
+  assert.deepEqual(out.thinking, { type: 'enabled' });
+  assert.equal(out.reasoning_effort, 'high');
+  // 其余字段照旧
+  assert.equal(out.max_tokens, 60000);
+  assert.equal(out.messages.length, 1);
+
+  // thinking:disabled 不该被映射成 enabled —— 客户端明确要关就必须关
+  const disabled = fromAnthropicRequest({
+    max_tokens: 60000,
+    thinking: { type: 'disabled' },
+    messages: [{ role: 'user', content: 'hi' }],
+  }, { allowThinking: true });
+  assert.equal(disabled.thinking, undefined);
+
+  // 没带 thinking 的请求不受开启影响（无开关可透传）
+  const plain = fromAnthropicRequest({
+    max_tokens: 60000,
+    messages: [{ role: 'user', content: 'hi' }],
+  }, { allowThinking: true });
+  assert.equal(plain.thinking, undefined);
+  assert.equal(plain.reasoning_effort, undefined);
 });
 
 // ---------------------------------------------------------------------------
@@ -405,9 +438,14 @@ const mockServer = http.createServer((req, res) => {
       return;
     }
     if (parsed.model === 'mock-empty') {
-      // 200 但 SSE 体零 data 事件（只有注释行）：空流收尾必须完整
+      // 200 with no completion must be treated as an upstream error.
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       res.end(': keep-alive\n\n');
+      return;
+    }
+    if (parsed.model === 'mock-early-fin') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.end('data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n');
       return;
     }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -487,13 +525,19 @@ test('E2E 错误透传：上游 500 → 500 Anthropic error envelope', async () 
   assert.equal(body.error.message, 'boom');
 });
 
-test('E2E 空流：上游 200 零 data 事件 → 流式仍以 message_delta + message_stop 收尾', async () => {
-  const res = await postMessages({ model: 'mock-empty', max_tokens: 32, stream: true, messages: [{ role: 'user', content: 'hi' }] }, { 'x-api-key': KEY });
-  assert.equal(res.status, 200);
-  const text = await res.text();
-  const events = [...text.matchAll(/event: (.+)\ndata: (.+)\n\n/g)].map((m) => ({ event: m[1], data: JSON.parse(m[2]) }));
-  assert.deepEqual(events.map((e) => e.event), ['message_start', 'ping', 'message_delta', 'message_stop']);
-  assert.equal(events[2].data.delta.stop_reason, 'end_turn');
+test('E2E 空流和提前结束 → Anthropic error 事件，而不是 message_stop', async () => {
+  for (const model of ['mock-empty', 'mock-early-fin']) {
+    const res = await postMessages({ model, max_tokens: 32, stream: true, messages: [{ role: 'user', content: 'hi' }] }, { 'x-api-key': KEY });
+    assert.equal(res.status, 200);
+    const text = await res.text();
+    const events = [...text.matchAll(/event: (.+)\ndata: (.+)\n\n/g)].map((m) => ({ event: m[1], data: JSON.parse(m[2]) }));
+    assert.equal(events.at(-1).event, 'error');
+    assert.equal(events.at(-1).data.error.type, 'api_error');
+    assert.equal(events.some((e) => e.event === 'message_stop'), false);
+  }
+  const nonstream = await postMessages({ model: 'mock-empty', max_tokens: 32, messages: [{ role: 'user', content: 'hi' }] }, { 'x-api-key': KEY });
+  assert.equal(nonstream.status, 502);
+  assert.equal((await nonstream.json()).error.type, 'api_error');
 });
 
 test('E2E 413：超限请求体 → Anthropic error envelope', async () => {
