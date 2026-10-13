@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
@@ -90,7 +91,7 @@ async function waitPort(port, timeoutMs = 5000) {
 
 function startProxy(env = {}) {
   return spawn(process.execPath, ['src/server.mjs'], {
-    cwd: new URL('..', import.meta.url).pathname,
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
     env: { ...process.env, PROXY_PORT: String(PROXY_PORT), PROXY_KEY: KEY, CNB_REPO_SLUG: 'test/repo', CNB_TOKEN: 'test-token', UPSTREAM_OVERRIDE: `http://127.0.0.1:${MOCK_PORT}`, PROXY_UPSTREAM_TIMEOUT_MS: '400', PROXY_IDLE_TIMEOUT_MS: '400', PROXY_MODELS_STATE: STATE_PATH, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -419,7 +420,7 @@ test('reasoning_effort 出站剥除（真机教训：触发上游 thinking 变�
 
 test('超时环境变量非法值 → 启动即拒（fail-fast，回归：NaN 曾使 setTimeout 按 0ms 触发、每条流瞬间 abort）', async () => {
   const bad = spawn(process.execPath, ['src/server.mjs'], {
-    cwd: new URL('..', import.meta.url).pathname,
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
     env: { ...process.env, PROXY_PORT: String(PROXY_PORT + 1), PROXY_KEY: KEY, CNB_REPO_SLUG: 'test/repo', CNB_TOKEN: 'test-token', UPSTREAM_OVERRIDE: `http://127.0.0.1:${MOCK_PORT}`, PROXY_IDLE_TIMEOUT_MS: 'abc' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -434,7 +435,7 @@ test('超时环境变量非法值 → 启动即拒（fail-fast，回归：NaN �
 test('CNB2API_ALLOW_THINKING=1 → 思考开关透传到上游（逃生口）', async () => {
   const OPTIN_PORT = PROXY_PORT + 2;
   const optIn = spawn(process.execPath, ['src/server.mjs'], {
-    cwd: new URL('..', import.meta.url).pathname,
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
     env: {
       ...process.env, PROXY_PORT: String(OPTIN_PORT), PROXY_KEY: KEY, CNB_REPO_SLUG: 'test/repo',
       CNB_TOKEN: 'test-token', UPSTREAM_OVERRIDE: `http://127.0.0.1:${MOCK_PORT}`,
